@@ -7710,7 +7710,7 @@ print(len(entries))
     expect(output).not.toContain("before-dev takes under a minute");
   });
 
-  it("[pi] --mode phase --platform pi uses sub-agent routing", () => {
+  it("[pi] --mode phase --platform pi routes inline by default, sub-agent when pi.dispatch_mode=auto", () => {
     writeTrellisScripts();
     writeProjectFile(path.join(".trellis", ".developer"), "name=test\n");
     writeProjectFile(
@@ -7724,17 +7724,32 @@ print(len(entries))
       "scripts",
       "get_context.py",
     );
-    const output = execSync(
+    // Default: no pi.dispatch_mode -> inline routing (before-dev / check in
+    // the main session; no dispatch routing bullet, no dispatch protocol).
+    const inlineOut = execSync(
       `${pythonCmd} ${JSON.stringify(contextScript)} --mode phase --platform pi`,
       { cwd: tmpDir, encoding: "utf-8" },
     );
-
-    expect(output).toContain("trellis-implement");
-    expect(output).toContain("implement.jsonl");
-    expect(output).not.toContain(
-      "| About to write code / start implementing | trellis-before-dev |",
+    expect(inlineOut).toContain("`trellis-before-dev`");
+    expect(inlineOut).not.toContain("dispatch `trellis-implement`");
+    expect(inlineOut).not.toContain(
+      "Sub-agent dispatch protocol applies to all platforms",
     );
-    expect(output).not.toContain("before-dev takes under a minute");
+
+    // Explicit auto: sub-agent dispatch routing comes back.
+    writeProjectFile(
+      path.join(".trellis", "config.yaml"),
+      "pi:\n  dispatch_mode: auto\n",
+    );
+    const autoOut = execSync(
+      `${pythonCmd} ${JSON.stringify(contextScript)} --mode phase --platform pi`,
+      { cwd: tmpDir, encoding: "utf-8" },
+    );
+    expect(autoOut).toContain("dispatch `trellis-implement`");
+    expect(autoOut).toContain(
+      "Sub-agent dispatch protocol applies to all platforms",
+    );
+    expect(autoOut).toContain("implement.jsonl");
   });
 
   it("[workflow-v2] step 2.1 for Codex describes native hook injection with child-side fallback", () => {
@@ -7765,7 +7780,7 @@ print(len(entries))
     expect(output).not.toContain("Load the `trellis-before-dev` skill");
   });
 
-  it("[pi] step 2.1 describes extension-backed sub-agent context path", () => {
+  it("[pi] step 2.1 routes inline by default, dispatches when pi.dispatch_mode=auto", () => {
     writeTrellisScripts();
     writeProjectFile(path.join(".trellis", ".developer"), "name=test\n");
     writeProjectFile(
@@ -7779,15 +7794,146 @@ print(len(entries))
       "scripts",
       "get_context.py",
     );
-    const output = execSync(
+    // Default: inline step 2.1 loads trellis-before-dev and implements in the
+    // main session.
+    const inlineOut = execSync(
       `${pythonCmd} ${JSON.stringify(contextScript)} --mode phase --step 2.1 --platform pi`,
       { cwd: tmpDir, encoding: "utf-8" },
     );
+    expect(inlineOut).toContain("Load the `trellis-before-dev` skill");
+    expect(inlineOut).toContain("Run project lint and type-check");
+    expect(inlineOut).not.toContain("The platform hook/plugin auto-handles");
 
-    expect(output).toContain("The platform hook/plugin auto-handles");
-    expect(output).toContain("Reads `implement.jsonl`");
-    expect(output).not.toContain("The Codex sub-agent definition auto-handles");
-    expect(output).not.toContain("Load the `trellis-before-dev` skill");
+    // Explicit auto: the extension-backed dispatch block returns, including
+    // the jsonl context injection path.
+    writeProjectFile(
+      path.join(".trellis", "config.yaml"),
+      "pi:\n  dispatch_mode: auto\n",
+    );
+    const autoOut = execSync(
+      `${pythonCmd} ${JSON.stringify(contextScript)} --mode phase --step 2.1 --platform pi`,
+      { cwd: tmpDir, encoding: "utf-8" },
+    );
+    expect(autoOut).toContain("The platform hook/plugin auto-handles");
+    expect(autoOut).toContain("Reads `implement.jsonl`");
+    expect(autoOut).not.toContain("Load the `trellis-before-dev` skill");
+  });
+
+  it("[pi-dispatch-mode] resolve_effective_platform namespaces pi into pi-inline (default) / pi-sub-agent", () => {
+    setupTaskRepo();
+    writeTrellisScripts();
+    const probePath = path.join(tmpDir, "probe_pi_effective_platform.py");
+    fs.writeFileSync(
+      probePath,
+      [
+        "import sys, json",
+        `sys.path.insert(0, ${JSON.stringify(path.join(tmpDir, ".trellis", "scripts"))})`,
+        "from common.workflow_phase import resolve_effective_platform",
+        "result = {",
+        "  'pi_default': resolve_effective_platform('pi', {}),",
+        "  'pi_explicit_inline': resolve_effective_platform('pi', {'pi': {'dispatch_mode': 'inline'}}),",
+        "  'pi_explicit_auto': resolve_effective_platform('pi', {'pi': {'dispatch_mode': 'auto'}}),",
+        "  'pi_explicit_subagent': resolve_effective_platform('pi', {'pi': {'dispatch_mode': 'sub-agent'}}),",
+        "  'pi_invalid_mode': resolve_effective_platform('pi', {'pi': {'dispatch_mode': 'invalid'}}),",
+        "  'pi_invalid_config': resolve_effective_platform('pi', {'pi': True}),",
+        "  'pi_ignores_codex': resolve_effective_platform('pi', {'codex': {'dispatch_mode': 'inline'}}),",
+        "  'codex_default_unchanged': resolve_effective_platform('codex', {'pi': {'dispatch_mode': 'auto'}}),",
+        "}",
+        "print(json.dumps(result))",
+      ].join("\n"),
+    );
+    const output = execSync(`${pythonCmd} ${JSON.stringify(probePath)}`, {
+      cwd: tmpDir,
+      encoding: "utf-8",
+    });
+    const result = JSON.parse(
+      output
+        .split("\n")
+        .filter((l) => l.startsWith("{"))
+        .pop() ?? "{}",
+    ) as Record<string, string>;
+    // Pi defaults to inline in this fork.
+    expect(result.pi_default).toBe("pi-inline");
+    expect(result.pi_explicit_inline).toBe("pi-inline");
+    expect(result.pi_explicit_auto).toBe("pi-sub-agent");
+    expect(result.pi_explicit_subagent).toBe("pi-sub-agent");
+    // Invalid values fall back to inline rather than dispatching.
+    expect(result.pi_invalid_mode).toBe("pi-inline");
+    expect(result.pi_invalid_config).toBe("pi-inline");
+    // pi and codex sections are independent.
+    expect(result.pi_ignores_codex).toBe("pi-inline");
+    expect(result.codex_default_unchanged).toBe("codex-sub-agent");
+  });
+
+  it("[pi-dispatch-mode] task.py create seeds jsonl for .pi only when pi.dispatch_mode=auto", () => {
+    setupTaskRepo();
+    fs.mkdirSync(path.join(tmpDir, ".pi"), { recursive: true });
+    const taskScriptPath = path.join(tmpDir, ".trellis", "scripts", "task.py");
+    const runCreate = (slug: string) =>
+      execSync(
+        `${pythonCmd} ${JSON.stringify(taskScriptPath)} create "pi-seed" --description "regression fixture" --slug ${slug} --assignee test-dev --no-start`,
+        { cwd: tmpDir, encoding: "utf-8" },
+      );
+    runCreate("pi-seed-inline");
+    const inlineDir = fs
+      .readdirSync(path.join(tmpDir, ".trellis", "tasks"))
+      .find((d) => d.includes("pi-seed-inline")) as string;
+    // Default inline: a bare .pi/ directory does not seed JSONL manifests.
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".trellis", "tasks", inlineDir, "implement.jsonl"),
+      ),
+    ).toBe(false);
+
+    writeProjectFile(
+      path.join(".trellis", "config.yaml"),
+      "pi:\n  dispatch_mode: auto\n",
+    );
+    runCreate("pi-seed-auto");
+    const autoDir = fs
+      .readdirSync(path.join(tmpDir, ".trellis", "tasks"))
+      .find((d) => d.includes("pi-seed-auto")) as string;
+    // Explicit auto: the pi platform consumes JSONL, so create seeds it.
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".trellis", "tasks", autoDir, "implement.jsonl"),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".trellis", "tasks", autoDir, "check.jsonl"),
+      ),
+    ).toBe(true);
+  });
+
+  it("[pi-dispatch-mode] pi extension template resolves inline mode and prefers -inline breadcrumbs", () => {
+    const { readFileSync } = fs;
+    const { dirname, join: pathJoin } = path;
+    const extensionPath = pathJoin(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "src",
+      "templates",
+      "pi",
+      "extensions",
+      "trellis",
+      "index.ts.txt",
+    );
+    const extensionSource = readFileSync(extensionPath, "utf-8");
+    // The template carries the Pi dispatch-mode reader with inline default,
+    // the -inline breadcrumb preference, and the conditional dispatch tool
+    // guidance; the Active task: dispatch protocol text stays present for the
+    // auto branch (single source of truth with workflow.md).
+    expect(extensionSource).toContain("function readPiDispatchMode");
+    expect(extensionSource).toContain('"inline" | "auto"');
+    expect(extensionSource).toContain("templates[inlineLookup]");
+    expect(extensionSource).toContain("piInlineMode");
+    expect(extensionSource).toContain(
+      'Sub-agent dispatch protocol (Trellis): your dispatch prompt MUST start with',
+    );
+    expect(extensionSource).toContain(
+      'Dispatch a sub-agent only when the user explicitly asks for it',
+    );
   });
 
   it("[workflow-v2] --mode phase --platform kilo keeps trellis-before-dev routing (agent-less path)", () => {
@@ -10654,7 +10800,7 @@ describe("regression: session-start.py f-string Python <=3.11 compat (0.5.2)", (
       // regex test above is the primary gate. On macOS system Python 3.9 or
       // any CI runner with python3 < 3.12 this is a hard catch.
       const r = spawnSync(
-        "python3",
+        process.platform === "win32" ? "python" : "python3",
         [
           "-c",
           `import ast,sys; ast.parse(open(sys.argv[1], encoding='utf-8').read()); print('OK')`,

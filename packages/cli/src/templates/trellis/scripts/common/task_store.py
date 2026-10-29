@@ -27,6 +27,7 @@ from pathlib import Path
 from .config import (
     get_codex_dispatch_mode,
     get_packages,
+    get_pi_dispatch_mode,
     get_session_auto_commit,
     is_monorepo,
     resolve_package,
@@ -237,9 +238,10 @@ def _restore_child_links(unlinked: dict[Path, str | None]) -> None:
 # Config directories of platforms that consume implement.jsonl / check.jsonl.
 # Keep in sync with src/types/ai-tools.ts AI_TOOLS entries — these are the
 # platforms listed in workflow.md's "agent-capable" Skill Routing block.
-# Codex is checked separately because explicit inline mode does not consume
-# JSONL. Kilo / Antigravity / Devin are NOT in this list either: they load
-# specs through skills instead of JSONL.
+# Codex and Pi are checked separately because explicit inline mode does not
+# consume JSONL (Pi is inline by default in this fork). Kilo / Antigravity /
+# Devin are NOT in this list either: they load specs through skills instead
+# of JSONL.
 _SUBAGENT_CONFIG_DIRS: tuple[str, ...] = (
     ".claude",
     ".cursor",
@@ -250,7 +252,6 @@ _SUBAGENT_CONFIG_DIRS: tuple[str, ...] = (
     ".codebuddy",
     ".factory",   # Factory Droid
     ".github/copilot",
-    ".pi",        # Pi Agent
     ".trae",      # Trae IDE
     ".omp",       # Oh My Pi
     ".zcode",     # ZCode
@@ -258,21 +259,25 @@ _SUBAGENT_CONFIG_DIRS: tuple[str, ...] = (
     ".kimi-code", # Kimi Code
 )
 _CODEX_CONFIG_DIR = ".codex"
+_PI_CONFIG_DIR = ".pi"
 
 
 def _has_subagent_platform(repo_root: Path) -> bool:
     """Return True if any sub-agent-capable platform is configured.
 
     Detected by probing well-known config directories at the repo root. Codex
-    counts by default through ``codex.dispatch_mode: auto`` (including the
-    legacy ``sub-agent`` alias); explicit inline mode loads context through
-    skills, not JSONL.
+    and Pi count only through their dispatch_mode: ``auto`` (including the
+    legacy ``sub-agent`` alias) consumes JSONL, while inline mode loads
+    context through skills, not JSONL. Pi defaults to inline in this fork, so
+    a bare ``.pi/`` directory alone no longer seeds JSONL.
     """
     for config_dir in _SUBAGENT_CONFIG_DIRS:
         if (repo_root / config_dir).is_dir():
             return True
     if (repo_root / _CODEX_CONFIG_DIR).is_dir():
         return get_codex_dispatch_mode(repo_root) == "auto"
+    if (repo_root / _PI_CONFIG_DIR).is_dir():
+        return get_pi_dispatch_mode(repo_root) == "auto"
     return False
 
 

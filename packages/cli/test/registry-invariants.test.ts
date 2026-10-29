@@ -327,7 +327,8 @@ describe("every platform resolves to a marker label workflow.md uses", () => {
     // execFileSync, not execSync: the probe is multi-line, and going through a
     // shell would turn its newlines into literal backslash-n.
     const raw = execFileSync(
-      process.env.PYTHON_CMD || "python3",
+      process.env.PYTHON_CMD ||
+        (process.platform === "win32" ? "python" : "python3"),
       ["-c", probe, JSON.stringify(flags)],
       { encoding: "utf-8" },
     );

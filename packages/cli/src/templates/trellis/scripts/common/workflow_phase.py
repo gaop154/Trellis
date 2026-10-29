@@ -161,18 +161,21 @@ _PLATFORM_MARKER_LABELS: dict[str, str] = {
 
 
 def resolve_effective_platform(platform: str, config: dict) -> str:
-    """Map ``codex`` to a dispatch-mode-namespaced virtual platform name.
+    """Map ``codex`` / ``pi`` to dispatch-mode-namespaced virtual platform names.
 
     When ``--platform codex`` is passed, return ``"codex-sub-agent"`` by
     default or ``"codex-inline"`` when explicitly configured in
-    ``.trellis/config.yaml``. ``sub-agent`` remains an alias for ``auto``.
-    ``filter_platform`` then surfaces blocks whose marker lists include the
-    namespaced name (e.g. ``[codex-sub-agent, ...]`` or ``[codex-inline, Kilo,
-    Antigravity, Devin]``).
+    ``.trellis/config.yaml``. When ``--platform pi`` is passed, return
+    ``"pi-inline"`` by default (this fork keeps Pi inline) or
+    ``"pi-sub-agent"`` when ``pi.dispatch_mode`` is ``auto``. ``sub-agent``
+    remains an alias for ``auto`` on both. ``filter_platform`` then surfaces
+    blocks whose marker lists include the namespaced name (e.g.
+    ``[codex-sub-agent, pi-sub-agent, ...]`` or ``[codex-inline, pi-inline,
+    Kilo, Antigravity, Devin]``).
 
-    Native Codex context injection supports the ``auto`` default. Invalid
-    explicit values fall back to ``inline`` safely; this renderer deliberately
-    does not warn because it can run in normal CLI output flows.
+    Invalid explicit values fall back to ``inline`` safely for both
+    platforms; this renderer deliberately does not warn because it can run
+    in normal CLI output flows.
 
     Platforms whose marker label differs from their id resolve through
     ``_PLATFORM_MARKER_LABELS``. Everything else is returned unchanged.
@@ -195,6 +198,21 @@ def resolve_effective_platform(platform: str, config: dict) -> str:
                 else:
                     mode = "inline"
         return "codex-sub-agent" if mode == "auto" else "codex-inline"
+    if platform == "pi":
+        mode = "inline"
+        pi_cfg = config.get("pi") if isinstance(config, dict) else None
+        if pi_cfg is not None:
+            if not isinstance(pi_cfg, dict):
+                mode = "inline"
+            else:
+                cfg_mode = str(pi_cfg.get("dispatch_mode", mode)).strip().lower()
+                if cfg_mode == "inline":
+                    mode = "inline"
+                elif cfg_mode in ("auto", "sub-agent"):
+                    mode = "auto"
+                else:
+                    mode = "inline"
+        return "pi-sub-agent" if mode == "auto" else "pi-inline"
     return platform
 
 

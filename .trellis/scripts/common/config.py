@@ -23,6 +23,7 @@ DEFAULT_SESSION_COMMIT_MESSAGE = "chore: record journal"
 DEFAULT_MAX_JOURNAL_LINES = 2000
 DEFAULT_SESSION_AUTO_COMMIT = True
 DEFAULT_CODEX_DISPATCH_MODE = "auto"
+DEFAULT_PI_DISPATCH_MODE = "inline"
 
 CONFIG_FILE = "config.yaml"
 
@@ -137,6 +138,40 @@ def get_session_auto_commit(repo_root: Path | None = None) -> bool:
     )
 
 
+def _normalize_dispatch_mode(
+    section: object, default: str, label: str
+) -> str:
+    """Normalize a per-platform ``<platform>.dispatch_mode`` config section.
+
+    Shared by ``get_codex_dispatch_mode`` and ``get_pi_dispatch_mode``. A
+    missing section returns the platform default. ``auto`` dispatches
+    Trellis sub-agents; ``inline`` keeps work in the main session;
+    ``sub-agent`` is a backwards-compatible alias for ``auto``. An invalid
+    section shape or value falls back to ``inline`` with one stderr warning
+    rather than unexpectedly dispatching a sub-agent.
+    """
+    if section is None:
+        return default
+    if not isinstance(section, dict):
+        print(
+            f"[WARN] invalid {label} config: {section!r}; using inline",
+            file=sys.stderr,
+        )
+        return "inline"
+
+    raw = section.get("dispatch_mode", default)
+    mode = str(raw).strip().lower()
+    if mode in ("auto", "inline"):
+        return mode
+    if mode == "sub-agent":
+        return "auto"
+    print(
+        f"[WARN] invalid {label}.dispatch_mode value: {raw!r}; using inline",
+        file=sys.stderr,
+    )
+    return "inline"
+
+
 def get_codex_dispatch_mode(repo_root: Path | None = None) -> str:
     """Return Codex dispatch mode.
 
@@ -150,27 +185,28 @@ def get_codex_dispatch_mode(repo_root: Path | None = None) -> str:
     without producing per-turn warning noise.
     """
     config = _load_config(repo_root)
-    codex = config.get("codex")
-    if codex is None:
-        return DEFAULT_CODEX_DISPATCH_MODE
-    if not isinstance(codex, dict):
-        print(
-            f"[WARN] invalid codex config: {codex!r}; using inline",
-            file=sys.stderr,
-        )
-        return "inline"
-
-    raw = codex.get("dispatch_mode", DEFAULT_CODEX_DISPATCH_MODE)
-    mode = str(raw).strip().lower()
-    if mode in ("auto", "inline"):
-        return mode
-    if mode == "sub-agent":
-        return "auto"
-    print(
-        f"[WARN] invalid codex.dispatch_mode value: {raw!r}; using inline",
-        file=sys.stderr,
+    return _normalize_dispatch_mode(
+        config.get("codex"), DEFAULT_CODEX_DISPATCH_MODE, "codex"
     )
-    return "inline"
+
+
+def get_pi_dispatch_mode(repo_root: Path | None = None) -> str:
+    """Return Pi dispatch mode.
+
+    Default is ``inline`` (this fork's choice): the main Pi session
+    implements/checks directly through the ``trellis-before-dev`` and
+    ``trellis-check`` skills and the per-turn breadcrumb uses the
+    ``<status>-inline`` variants. Set ``pi.dispatch_mode: auto`` to opt back
+    into the sub-agent dispatch flow (``sub-agent`` is a legacy alias for
+    ``auto``).
+
+    Invalid explicit configuration falls back to ``inline`` rather than
+    unexpectedly dispatching a sub-agent.
+    """
+    config = _load_config(repo_root)
+    return _normalize_dispatch_mode(
+        config.get("pi"), DEFAULT_PI_DISPATCH_MODE, "pi"
+    )
 
 
 DEFAULT_CONTEXT_INJECTION_MAX_FILE_BYTES = 32768

@@ -846,6 +846,48 @@ function readContextInjectionLimits(repoRoot: string): ContextInjectionLimits {
   return limits;
 }
 
+/** Pi dispatch mode resolved from the `pi:` block of `.trellis/config.yaml`,
+ * cached per repo root for the life of the extension process (config changes
+ * take effect on the next session). Mirrors `common.config.get_pi_dispatch_mode()`
+ * semantics for this section only: default "inline" (this fork keeps Pi
+ * inline), "auto" / "sub-agent" opt back into sub-agent dispatch, and an
+ * unreadable or invalid config falls back to "inline" without warnings —
+ * this can run per turn and must not spam stderr. */
+const PI_DISPATCH_MODE_CACHE = new Map<string, "inline" | "auto">();
+function readPiDispatchMode(repoRoot: string): "inline" | "auto" {
+  const cached = PI_DISPATCH_MODE_CACHE.get(repoRoot);
+  if (cached) return cached;
+  let mode: "inline" | "auto" = "inline";
+  const text = readText(join(repoRoot, ".trellis", "config.yaml"));
+  if (text) {
+    let inSection = false;
+    let sectionIndent = -1;
+    for (const rawLine of text.split(/\r?\n/)) {
+      const trimmed = rawLine.trim();
+      if (!inSection) {
+        if (/^pi\s*:\s*(#.*)?$/.test(trimmed)) {
+          inSection = true;
+          sectionIndent = rawLine.length - rawLine.trimStart().length;
+        }
+        continue;
+      }
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const indent = rawLine.length - rawLine.trimStart().length;
+      if (indent <= sectionIndent) break;
+      const m = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$/);
+      if (!m) continue;
+      if (m[1] !== "dispatch_mode") continue;
+      const raw = unquoteYaml(stripInlineComment(m[2]!).trim())
+        .trim()
+        .toLowerCase();
+      if (raw === "auto" || raw === "sub-agent") mode = "auto";
+      break;
+    }
+  }
+  PI_DISPATCH_MODE_CACHE.set(repoRoot, mode);
+  return mode;
+}
+
 class ContextBudget {
   used = 0;
   constructor(private maxTotalBytes: number) {}
@@ -1147,7 +1189,16 @@ function workflowBreadcrumb(root: string, key: string | null): string {
       }
     } catch {}
   }
-  const body = templates[lookup] ?? "Refer to workflow.md for current step.";
+  // pi.dispatch_mode=inline prefers the `<status>-inline` breadcrumb
+  // variants, mirroring the Python hook's codex resolve_breadcrumb_key:
+  // a missing -inline tag falls back to the plain status tag.
+  const inlineLookup = `${lookup}-inline`;
+  const body =
+    readPiDispatchMode(root) === "inline"
+      ? templates[inlineLookup] ??
+        templates[lookup] ??
+        "Refer to workflow.md for current step."
+      : templates[lookup] ?? "Refer to workflow.md for current step.";
   return `<workflow-state>\n${header}\n${body}\n</workflow-state>`;
 }
 
@@ -1864,16 +1915,26 @@ export default function trellisExtension(pi: {
     handler: async (ctx: PiExtensionContext) => toggleDetail(ctx),
   });
 
-  // Tool registration
+  // Tool registration. In pi.dispatch_mode=inline (the default in this
+  // fork) the always-visible tool guidance is swapped for an explicit-request
+  // note so the catalog does not push the main session into sub-agent
+  // dispatch against the inline workflow; the tool itself stays available
+  // for explicit requests.
+  const piInlineMode = readPiDispatchMode(resolveRoot()) === "inline";
   pi.registerTool?.({
     name: "trellis_subagent",
     label: "Trellis Subagent",
     description: "Run a Trellis project sub-agent with active task context.",
-    promptSnippet:
-      'Sub-agent dispatch protocol (Trellis): your dispatch prompt MUST start with one line "Active task: <task path from `task.py current`>" before any other instructions.',
-    promptGuidelines: [
-      'Use subagent for task delegation. Your dispatch prompt MUST start with "Active task: <task path from `task.py current`>".',
-    ],
+    promptSnippet: piInlineMode
+      ? 'Trellis sub-agent dispatch (explicit-only): this project runs pi.dispatch_mode=inline, so implement/check work stays in the main session. Dispatch a sub-agent only when the user explicitly asks for it; the dispatch prompt MUST start with "Active task: <task path from `task.py current`>".'
+      : 'Sub-agent dispatch protocol (Trellis): your dispatch prompt MUST start with one line "Active task: <task path from `task.py current`>" before any other instructions.',
+    promptGuidelines: piInlineMode
+      ? [
+          "This project defaults to inline (main-session) implementation; only dispatch trellis_subagent when the user explicitly requests a sub-agent.",
+        ]
+      : [
+          'Use subagent for task delegation. Your dispatch prompt MUST start with "Active task: <task path from `task.py current`>".',
+        ],
     parameters: {
       type: "object",
       properties: {

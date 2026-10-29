@@ -79,8 +79,10 @@ Both regexes MUST use the `\1` backreference variant — `[workflow-state:([A-Za
 5. It opens `.trellis/workflow.md` and parses every `[workflow-state:STATUS]`
    block.
 6. Codex may map `planning` / `in_progress` to `planning-inline` /
-   `in_progress-inline` based on `codex.dispatch_mode`; all other platforms
-   use the plain status.
+   `in_progress-inline` based on `codex.dispatch_mode`; the Pi extension does
+   the same mapping based on `pi.dispatch_mode` (default `inline` in this
+   fork, falling back to the plain status when the `-inline` tag is absent).
+   All other platforms use the plain status.
 7. It looks up the current status in the parsed map. If found → emits the
    block body in `<workflow-state>...</workflow-state>`. If not found →
    emits the generic line `Refer to workflow.md for current step.`

@@ -830,7 +830,8 @@ Runtime script registry:
 
 ```python
 Platform = Literal[..., "pi", "zcode"]
-_SUBAGENT_CONFIG_DIRS = (..., ".pi", ".zcode")
+_SUBAGENT_CONFIG_DIRS = (..., ".omp", ".zcode")  # .pi moved out
+_PI_CONFIG_DIR = ".pi"  # gated by get_pi_dispatch_mode(), like .codex
 ```
 
 ### 3. Contracts
@@ -846,13 +847,13 @@ For Pi Agent:
 | Startup context                    | `before_agent_start` builds compact SessionStart-equivalent context (`<session-context>`, adaptive `<first-reply-notice>`, `<session-overview>`, `<trellis-workflow>`, `<ready>`) once per context key, memoizes it, and contributes the identical bytes to `systemPrompt` on every turn |
 | Per-agent-invocation context       | `before_agent_start.systemPrompt` carries a per-context-key snapshot of task context (PRD + jsonl) taken on first use; later on-disk task changes are delivered through `before_agent_start.message` as `<trellis-task-context-update>` persisted messages           |
 | Per-Bash-tool session identity     | `tool_call` extension event; mutates `event.input.command` in place via `injectTrellisContextIntoBash()` to prefix `export TRELLIS_CONTEXT_ID=<context-key>;`                                                                                                         |
-| Sub-agent dispatch                 | custom `trellis_subagent` tool with `promptSnippet`/`promptGuidelines = SUBAGENT_DISPATCH_PROTOCOL`; resolves the Pi CLI JS entrypoint when possible, runs `--mode text -p --no-session`, sends the delegated prompt through stdin, and forwards `TRELLIS_CONTEXT_ID` |
+| Sub-agent dispatch                 | custom `trellis_subagent` tool; resolves the Pi CLI JS entrypoint when possible, runs `--mode text -p --no-session`, sends the delegated prompt through stdin, and forwards `TRELLIS_CONTEXT_ID`. In `pi.dispatch_mode: inline` (the default in this fork) the tool stays registered but its `promptSnippet`/`promptGuidelines` are swapped for an explicit-request-only note so the always-visible tool catalog does not push the main session into dispatch; in `auto` they carry the standard dispatch protocol |
 
 The compact model-visible context injection point is `before_agent_start.message`; it uses `TurnContextCache` so the same request path does not re-spawn the default `get_context.py` session-context call unnecessarily. Pi does not register a Trellis `input` handler for runtime context injection, so user text is not rewritten. The existing Pi `context` event may establish the context key, but it must not append Trellis runtime messages because request-local messages are not persisted and can break provider prefix cache. See "Class-3 injection points (Pi extension)" below the modes table for the runtime contract.
 
 Cache-stability invariant: everything the extension contributes to `systemPrompt` must be byte-identical across every turn of a session (provider prefix caches invalidate from byte 0 on any system prompt change). Startup context and task context are therefore memoized per context key; anything volatile (workflow breadcrumb, session overview, task-doc changes) is delivered exclusively through persisted `before_agent_start.message` custom messages, and only when its content differs from the last persisted copy.
 
-If `agentCapable` is true, `task.py create` must seed `implement.jsonl` / `check.jsonl`, and generated sub-agent definitions or extension code must consume those files.
+If `agentCapable` is true, `task.py create` must seed `implement.jsonl` / `check.jsonl`, and generated sub-agent definitions or extension code must consume those files. Dispatch-mode-gated platforms (Codex via `codex.dispatch_mode`, Pi via `pi.dispatch_mode` — Pi defaults to `inline` in this fork) seed JSONL only in `auto` mode; explicit inline loads context through skills instead.
 
 ### 4. Validation & Error Matrix
 
@@ -897,7 +898,7 @@ Add or update tests that assert:
 - `configurePlatform("<platform>")` writes every generated file and writes no Python hook files for extension-backed platforms (canonical assertion: `expect(fs.existsSync(".pi/hooks")).toBe(false)` in `test/configurators/platforms.test.ts`).
 - `collectPlatformTemplates("<platform>")` matches init output paths.
 - `init({ <flag>: true })` creates platform assets and tracks hashes for all generated templates.
-- `get_context.py --mode phase --platform <platform>` routes to sub-agent-capable workflow blocks when `agentCapable` is true.
+- `get_context.py --mode phase --platform <platform>` routes to sub-agent-capable workflow blocks when `agentCapable` is true. Pi routes by `pi.dispatch_mode` — inline routing by default, sub-agent routing when `auto`.
 - Runtime script copies (`src/templates/trellis/scripts/**` and live `.trellis/scripts/**`) both recognize the platform.
 - The generated extension registers handlers for the Pi runtime surfaces (`before_agent_start`, `context`, `tool_call`) plus the `subagent` custom tool with `promptSnippet`/`promptGuidelines` set to the dispatch protocol constant, and does not register `input` for Trellis runtime context injection.
 - The TS-port workflow-state regex (`WF_RE` in `templates/pi/extensions/trellis/index.ts.txt:1072`) matches the same status names and body content as the Python `_TAG_RE` on a shared fixture from `templates/trellis/workflow.md`.

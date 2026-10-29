@@ -636,12 +636,12 @@ a `.current-task` fallback or a Python hook directory.
   `.trellis/.runtime/`.
 - `task.py create` creates `implement.jsonl` / `check.jsonl` only when the
   repo has a platform configured that consumes those files. For `.codex/`,
-  this is gated by `get_codex_dispatch_mode()`: the default is
-  `codex.dispatch_mode: auto` (native `SubagentStart` context injection with
-  a child-side pull fallback), which seeds JSONL like every other sub-agent
-  platform. `sub-agent` is a backwards-compatible alias for `auto`. Setting
-  `codex.dispatch_mode: inline` opts out and loads context through skills
-  instead, so JSONL is not seeded.
+  this is gated by `get_codex_dispatch_mode()` (default `auto`, native
+  `SubagentStart` injection with pull fallback); for `.pi/`, it is gated by
+  `get_pi_dispatch_mode()` the same way — except Pi defaults to `inline` in
+  this fork, so a bare `.pi/` directory alone does not seed JSONL. Setting
+  either platform's `dispatch_mode: inline` opts out and loads context
+  through skills instead, so JSONL is not seeded.
 - `task.py start` writes session-local state only when a context key is
   available. Otherwise it enters degraded mode: no session pointer is persisted,
   `.trellis/.current-task` is not written, and `task.json.status` may still move
@@ -736,6 +736,8 @@ a `.current-task` fallback or a Python hook directory.
 | `create` without context key | Task files exist; no `.runtime`; no `.current-task` |
 | `create` with `.codex/` and no `codex.dispatch_mode` override (default `auto`) | Task files exist; `implement.jsonl` and `check.jsonl` exist and are empty |
 | `create` with `.codex/` and `codex.dispatch_mode: inline` | Task files exist; no `implement.jsonl`; no `check.jsonl` |
+| `create` with `.pi/` and no `pi.dispatch_mode` override (default `inline`) | Task files exist; no `implement.jsonl`; no `check.jsonl` |
+| `create` with `.pi/` and `pi.dispatch_mode: auto` | Task files exist; `implement.jsonl` and `check.jsonl` exist and are empty |
 | `start` without context key | Returns success in degraded mode; no `.runtime`; no `.current-task`; hints IDE/session identity or `TRELLIS_CONTEXT_ID` |
 | `start` with `TRELLIS_CONTEXT_ID` | Writes `.runtime/sessions/<key>.json`; does not require `.current-task` |
 | `current --source` with same context key | Prints `Source: session:<key>` |

@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/cli/backend/workflow-state-contract.md", "reason": "面包屑/marker/regex 契约与 trellis update 整文件替换边界；本任务改动的核心约束源"}
+{"file": ".trellis/spec/cli/backend/script-conventions.md", "reason": "模板脚本（config.py/workflow_phase.py/task_store.py）的编码与容错约定"}
+{"file": ".trellis/spec/cli/backend/platform-integration.md", "reason": "平台注册、marker 平台列表与 .pi 扩展模板的集成规则"}
+{"file": ".trellis/spec/cli/backend/commands-workflow.md", "reason": "workflow.md 模板体系（native/tdd 等）与 marker 块的维护规则"}

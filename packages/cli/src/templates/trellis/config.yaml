@@ -130,6 +130,22 @@ channel:
 #   dispatch_mode: auto  # or "inline"; legacy alias: "sub-agent"
 
 #-------------------------------------------------------------------------------
+# Pi (dispatch behavior)
+#-------------------------------------------------------------------------------
+# Pi dispatch knob; other platforms ignore it. Default ("inline") keeps
+# implementation and checks in the main Pi session: the per-turn workflow
+# breadcrumb uses the `<status>-inline` variants and Phase 2 loads the
+# `trellis-before-dev` / `trellis-check` skills instead of dispatching
+# trellis-implement / trellis-check sub-agents; JSONL manifests are not
+# seeded. Set to "auto" to opt back into the sub-agent dispatch flow (the
+# `trellis_subagent` extension tool stays registered either way).
+# "sub-agent" remains a backwards-compatible alias for "auto". Invalid
+# explicit values safely use inline mode.
+#
+# pi:
+#   dispatch_mode: inline  # or "auto"; legacy alias: "sub-agent"
+
+#-------------------------------------------------------------------------------
 # Sub-agent context injection limits
 #-------------------------------------------------------------------------------
 # Caps how much task context (implement.jsonl / check.jsonl referenced files,

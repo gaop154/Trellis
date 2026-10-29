@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/cli/backend/quality-guidelines.md", "reason": "质量检查口径与路由修复审计模式（所有入口路径）"}
+{"file": ".trellis/spec/cli/backend/workflow-state-contract.md", "reason": "验证面包屑契约不变量：tag 块测试、registry 路由非空、DO/DON'T 清单"}
+{"file": ".trellis/spec/cli/backend/commands-update.md", "reason": "trellis update 的 hash 跟踪与整文件替换语义，验证 marker 变更可分发"}

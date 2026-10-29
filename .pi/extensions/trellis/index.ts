@@ -26,6 +26,7 @@ interface PiToolResult {
   details?: unknown;
 }
 interface PiExtensionContext {
+  cwd?: string;
   hasUI?: boolean;
   model?: {
     provider?: string;
@@ -845,6 +846,48 @@ function readContextInjectionLimits(repoRoot: string): ContextInjectionLimits {
   return limits;
 }
 
+/** Pi dispatch mode resolved from the `pi:` block of `.trellis/config.yaml`,
+ * cached per repo root for the life of the extension process (config changes
+ * take effect on the next session). Mirrors `common.config.get_pi_dispatch_mode()`
+ * semantics for this section only: default "inline" (this fork keeps Pi
+ * inline), "auto" / "sub-agent" opt back into sub-agent dispatch, and an
+ * unreadable or invalid config falls back to "inline" without warnings —
+ * this can run per turn and must not spam stderr. */
+const PI_DISPATCH_MODE_CACHE = new Map<string, "inline" | "auto">();
+function readPiDispatchMode(repoRoot: string): "inline" | "auto" {
+  const cached = PI_DISPATCH_MODE_CACHE.get(repoRoot);
+  if (cached) return cached;
+  let mode: "inline" | "auto" = "inline";
+  const text = readText(join(repoRoot, ".trellis", "config.yaml"));
+  if (text) {
+    let inSection = false;
+    let sectionIndent = -1;
+    for (const rawLine of text.split(/\r?\n/)) {
+      const trimmed = rawLine.trim();
+      if (!inSection) {
+        if (/^pi\s*:\s*(#.*)?$/.test(trimmed)) {
+          inSection = true;
+          sectionIndent = rawLine.length - rawLine.trimStart().length;
+        }
+        continue;
+      }
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const indent = rawLine.length - rawLine.trimStart().length;
+      if (indent <= sectionIndent) break;
+      const m = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$/);
+      if (!m) continue;
+      if (m[1] !== "dispatch_mode") continue;
+      const raw = unquoteYaml(stripInlineComment(m[2]!).trim())
+        .trim()
+        .toLowerCase();
+      if (raw === "auto" || raw === "sub-agent") mode = "auto";
+      break;
+    }
+  }
+  PI_DISPATCH_MODE_CACHE.set(repoRoot, mode);
+  return mode;
+}
+
 class ContextBudget {
   used = 0;
   constructor(private maxTotalBytes: number) {}
@@ -971,11 +1014,33 @@ function readJsonlEntries(basePath: string, jsonlPath: string): JsonlEntry[] {
 function findRoot(start: string): string {
   let c = resolve(start);
   while (true) {
-    if (existsSync(join(c, ".trellis")) || existsSync(join(c, ".pi"))) return c;
+    // Only a directory with `.trellis/` is a Trellis project root. A bare
+    // `.pi` can be pi's global config (`~/.pi`) or an unrelated project, so
+    // accepting it here made root resolution stop too early (e.g. on `~`).
+    // Also reject a regular file named `.trellis` — the marker must be a
+    // directory.
+    const marker = join(c, ".trellis");
+    if (existsSync(marker) && statSync(marker).isDirectory()) return c;
     const p = dirname(c);
     if (p === c) return resolve(start);
     c = p;
   }
+}
+// Resolve the project root from the session working directory when available
+// (pi's ExtensionContext.cwd), falling back to the pi host process cwd.
+// process.cwd() is the host's launch directory and can differ from the
+// session cwd (pi-web / RPC / multi-project hosts), which made .pi/agents
+// lookups fail or resolve to the wrong project.
+function resolveRoot(ctx?: PiExtensionContext): string {
+  return findRoot(ctx?.cwd ?? process.cwd());
+}
+// Cache key scoping per-session state by both the session key and the
+// resolved project root. With dynamic root resolution a session can observe
+// different ctx.cwd values over its lifetime (pi-web / RPC / project
+// switching); keying caches by the session key alone would leak one
+// project's startup/task context into another.
+function cacheKey(k: string | null, ctx?: PiExtensionContext): string {
+  return `${k ?? "default"}::${resolveRoot(ctx)}`;
 }
 function splitFM(c: string) {
   const m = c.replace(/^\uFEFF/, "").match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
@@ -1124,7 +1189,16 @@ function workflowBreadcrumb(root: string, key: string | null): string {
       }
     } catch {}
   }
-  const body = templates[lookup] ?? "Refer to workflow.md for current step.";
+  // pi.dispatch_mode=inline prefers the `<status>-inline` breadcrumb
+  // variants, mirroring the Python hook's codex resolve_breadcrumb_key:
+  // a missing -inline tag falls back to the plain status tag.
+  const inlineLookup = `${lookup}-inline`;
+  const body =
+    readPiDispatchMode(root) === "inline"
+      ? templates[inlineLookup] ??
+        templates[lookup] ??
+        "Refer to workflow.md for current step."
+      : templates[lookup] ?? "Refer to workflow.md for current step.";
   return `<workflow-state>\n${header}\n${body}\n</workflow-state>`;
 }
 
@@ -1761,7 +1835,9 @@ export default function trellisExtension(pi: {
   getThinkingLevel?: () => string;
 }): void {
   if (process.env.TRELLIS_SUBAGENT_CHILD === "1") return;
-  const root = findRoot(process.cwd());
+  // Process-level fallback; call sites with a session context re-resolve via
+  // resolveRoot(ctx) so the active project (session cwd) is used instead.
+  const root = resolveRoot();
   const procKey = `pi_process_${hash([root, process.pid, Date.now(), randomBytes(8).toString("hex")].join(":"))}`;
   let curKey: string | null = null;
 
@@ -1773,20 +1849,22 @@ export default function trellisExtension(pi: {
 
   // Per-turn cache to avoid double-spawning python
   let turnCache: {
-    key: string | null;
+    key: string;
     ts: number;
     wf: string;
     ov: string;
   } | null = null;
-  const getTurnCtx = (k: string | null) => {
+  const getTurnCtx = (k: string | null, ctx?: PiExtensionContext) => {
     const now = Date.now();
-    if (turnCache && turnCache.key === k && now - turnCache.ts < 1500)
+    const ck = cacheKey(k, ctx);
+    if (turnCache && turnCache.key === ck && now - turnCache.ts < 1500)
       return turnCache;
+    const r = resolveRoot(ctx);
     turnCache = {
-      key: k,
+      key: ck,
       ts: now,
-      wf: workflowBreadcrumb(root, k),
-      ov: sessionOverview(root, k),
+      wf: workflowBreadcrumb(r, k),
+      ov: sessionOverview(r, k),
     };
     return turnCache;
   };
@@ -1798,11 +1876,12 @@ export default function trellisExtension(pi: {
   const getStartupCtx = (
     k: string | null,
     turn: { ov: string },
+    ctx?: PiExtensionContext,
   ): string => {
-    const key = k ?? "default";
+    const key = cacheKey(k, ctx);
     let startup = startupCtxCache.get(key);
     if (startup === undefined) {
-      startup = buildStartupContext(root, k, turn.ov);
+      startup = buildStartupContext(resolveRoot(ctx), k, turn.ov);
       startupCtxCache.set(key, startup);
     }
     return startup;
@@ -1810,6 +1889,14 @@ export default function trellisExtension(pi: {
   const taskCtxSnapshot = new Map<string, string>();
   const lastSentTaskCtx = new Map<string, string>();
   const lastSentRuntimeCtx = new Map<string, string>();
+  // Session-level "most recently persisted" project root. The root-scoped
+  // lastSent* maps suppress re-emission for an unchanged root, but when a
+  // session switches projects (A -> B -> A) the latest persisted update
+  // would otherwise stay B's — and its <trellis-task-context-update>
+  // explicitly supersedes the system-prompt context. Re-assert the current
+  // root's task/runtime context on every root transition so the agent never
+  // keeps following the previous project's instructions.
+  const lastPersistedRoot = new Map<string, string>();
 
   // Toggle only the latest subagent native card; do not use Pi global tool expansion.
   const toggleDetail = (ctx: PiExtensionContext) => {
@@ -1828,16 +1915,26 @@ export default function trellisExtension(pi: {
     handler: async (ctx: PiExtensionContext) => toggleDetail(ctx),
   });
 
-  // Tool registration
+  // Tool registration. In pi.dispatch_mode=inline (the default in this
+  // fork) the always-visible tool guidance is swapped for an explicit-request
+  // note so the catalog does not push the main session into sub-agent
+  // dispatch against the inline workflow; the tool itself stays available
+  // for explicit requests.
+  const piInlineMode = readPiDispatchMode(resolveRoot()) === "inline";
   pi.registerTool?.({
     name: "trellis_subagent",
     label: "Trellis Subagent",
     description: "Run a Trellis project sub-agent with active task context.",
-    promptSnippet:
-      'Sub-agent dispatch protocol (Trellis): your dispatch prompt MUST start with one line "Active task: <task path from `task.py current`>" before any other instructions.',
-    promptGuidelines: [
-      'Use subagent for task delegation. Your dispatch prompt MUST start with "Active task: <task path from `task.py current`>".',
-    ],
+    promptSnippet: piInlineMode
+      ? 'Trellis sub-agent dispatch (explicit-only): this project runs pi.dispatch_mode=inline, so implement/check work stays in the main session. Dispatch a sub-agent only when the user explicitly asks for it; the dispatch prompt MUST start with "Active task: <task path from `task.py current`>".'
+      : 'Sub-agent dispatch protocol (Trellis): your dispatch prompt MUST start with one line "Active task: <task path from `task.py current`>" before any other instructions.',
+    promptGuidelines: piInlineMode
+      ? [
+          "This project defaults to inline (main-session) implementation; only dispatch trellis_subagent when the user explicitly requests a sub-agent.",
+        ]
+      : [
+          'Use subagent for task delegation. Your dispatch prompt MUST start with "Active task: <task path from `task.py current`>".',
+        ],
     parameters: {
       type: "object",
       properties: {
@@ -1877,6 +1974,7 @@ export default function trellisExtension(pi: {
       ctx?: PiExtensionContext,
     ) => {
       activeSubagentToolCallId = id;
+      const root = resolveRoot(ctx);
       const agentName = normalizeAgent(input.agent);
       if (!isTrellisAgent(root, agentName)) {
         return {
@@ -2028,10 +2126,11 @@ export default function trellisExtension(pi: {
   });
   pi.on?.("before_agent_start", (event, ctx) => {
     const k = getKey(event, ctx);
-    const key = k ?? "default";
+    const key = cacheKey(k, ctx);
     const cur = (event as { systemPrompt?: string }).systemPrompt ?? "";
-    const turn = getTurnCtx(k);
-    const startup = getStartupCtx(k, turn);
+    const root = resolveRoot(ctx);
+    const turn = getTurnCtx(k, ctx);
+    const startup = getStartupCtx(k, turn, ctx);
     // Task context is snapshotted into systemPrompt once; later on-disk
     // changes are delivered as persisted messages so the prefix stays stable.
     const freshTaskCtx = buildContext(root, "trellis-implement", k);
@@ -2043,11 +2142,23 @@ export default function trellisExtension(pi: {
     }
     const updates: string[] = [];
     const runtimeContext = [turn.wf, turn.ov].filter(Boolean).join("\n\n");
-    if (runtimeContext && runtimeContext !== lastSentRuntimeCtx.get(key)) {
+    // Re-assert the current root's context on project switches: when the
+    // session returns to an unchanged root, the root-scoped lastSent* maps
+    // alone would leave the previous project's persisted update as the most
+    // recent one in history.
+    const prevRoot = lastPersistedRoot.get(k ?? "default");
+    const switchedRoot = prevRoot !== undefined && prevRoot !== root;
+    if (
+      runtimeContext &&
+      (runtimeContext !== lastSentRuntimeCtx.get(key) || switchedRoot)
+    ) {
       lastSentRuntimeCtx.set(key, runtimeContext);
       updates.push(runtimeContext);
     }
-    if (freshTaskCtx !== lastSentTaskCtx.get(key)) {
+    if (
+      freshTaskCtx !== lastSentTaskCtx.get(key) ||
+      switchedRoot
+    ) {
       lastSentTaskCtx.set(key, freshTaskCtx);
       updates.push(
         "<trellis-task-context-update>\nTask context changed on disk. This supersedes the Trellis Task Context in the system prompt.\n\n" +
@@ -2055,6 +2166,7 @@ export default function trellisExtension(pi: {
           "\n</trellis-task-context-update>",
       );
     }
+    if (updates.length > 0) lastPersistedRoot.set(k ?? "default", root);
     const content = updates.join("\n\n");
     return {
       message: content
